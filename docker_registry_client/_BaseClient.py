@@ -1,7 +1,8 @@
 import logging
-from requests import get, put, delete
+from requests import get, put, delete, Response
 from requests.exceptions import HTTPError
 import json
+import re
 
 # urllib3 throws some ssl warnings with older versions of python
 #   they're probably ok for the registry client to ignore
@@ -22,19 +23,19 @@ class CommonBaseClient(object):
         if username is not None and password is not None:
             self.method_kwargs['auth'] = (username, password)
     
-    def _http_response(self, url, method, data=None, **kwargs):
+    def _http_response(self, url, method, data=None, headers={}, **kwargs):
         """url -> full target url
            method -> method from requests
            data -> request body
            kwargs -> url formatting args
         """
-        header = {'content-type': 'application/json'}
+        headers['content-type'] = 'application/json'
         if data:
             data = json.dumps(data)
         path = url.format(**kwargs)
         logger.debug("%s %s", method.__name__.upper(), path)
         response = method(self.host + path,
-                          data=data, headers=header, **self.method_kwargs)
+                          data=data, headers=headers, **self.method_kwargs)
         logger.debug("%s %s", response.status_code, response.reason)
         if not response.ok:
             logger.error("Error response: %r", response.text)
@@ -42,13 +43,13 @@ class CommonBaseClient(object):
 
         return response
 
-    def _http_call(self, url, method, data=None, **kwargs):
+    def _http_call(self, url, method, data=None, headers={}, **kwargs):
         """url -> full target url
            method -> method from requests
            data -> request body
            kwargs -> url formatting args
         """
-        response = self._http_response(url, method, data=data, **kwargs)
+        response = self._http_response(url, method, data=data, headers=headers, **kwargs)
         if not response.content:
             return {}
 
@@ -58,6 +59,174 @@ class CommonBaseClient(object):
             logger.error("Unable to decode json for response %r, url %s",
                          response.text, url.format(**kwargs))
             raise
+
+
+class OAuth2TokenHandler:
+    """
+    Handles the token fetch and caching.
+    Caches by url and token scope.
+
+    """
+    authorization_header_format = 'Bearer {0}'
+    _www_authentication_regex = 'Bearer (realm="[^"]+")(,service="[^"]+")?(,scope="[^"]+")?'
+
+    def __init__(self):
+        self._tokens = {}
+        self._www_auth_matcher = re.compile(self._www_authentication_regex)
+
+    def _add_token(self, url, params, raw_token):
+        self._tokens[url] = { 'urls': [url], 'params':params, 'raw_token': raw_token}
+
+    def lookup_by_url(self, url):
+        return self._tokens[url]['raw_token']
+
+    def lookup_by_params(self, params):
+        """
+        Lookup by the service and scope. If multiple results found, return the first
+
+        :param params:
+        :return: token associated with params values (e.g. scope, service)
+        """
+        matches = filter(lambda x: x['params'] == params, self._tokens.values())
+        if len(matches) > 0:
+            return matches[0]['raw_token']
+        else:
+            raise KeyError(params)
+
+    def _parse_wwwauthenticate(self, header):
+        print 'Parsing authenticate header {0}'.format(header)
+
+        header = header.strip()
+        header_match = self._www_auth_matcher.search(header)
+        if len(header_match.groups()) <= 0:
+            raise ValueError('Unexpected header value. Should start with Bearer token')
+
+        params = {}
+        for chunk in header_match.groups():
+            if chunk is not None:
+                c = chunk.split('=')
+                params[c[0].lstrip(',')] = c[1].strip('"')
+
+        try:
+            return params.pop('realm'), params
+        except KeyError:
+            print str(params)
+            raise ValueError('Error header should include a realm key')
+
+    def invalidate_token(self, token):
+        self._flush_token(token)
+
+    def _flush_token(self, token):
+        print 'Flushing token'
+        for x in filter(lambda x: x['raw_token']['token'] == token, self._tokens.values()):
+            self._tokens.pop(x)
+
+    @staticmethod
+    def needs_token(err_response):
+        return 400 <= err_response.status_code < 500 and err_response.reason == 'Unauthorized'
+
+    @staticmethod
+    def token_is_invalid(err_response):
+        """
+        Determine if the response is due to invalid token.
+        :param err_response: the _http_response() output of the request to check. Should include the original request
+        :return: token value from request if invalid, else False
+        """
+        if OAuth2TokenHandler.needs_token(err_response) \
+            and 'Authorization' in err_response.request.headers \
+            and err_response.response.content.contains('Invalid token'):
+            return err_response.request.headers['Authorization'].split(' ')[1]
+        else:
+            return False
+
+    def request_auth_token(self, err_response):
+        """
+        Get a token from the passed error response that indicates a required token
+        :param err_response:
+        :return:
+        """
+        try:
+            req_url = err_response.request.url
+            auth_url, req_params = self._parse_wwwauthenticate(err_response.headers['www-authenticate'])
+        except KeyError:
+            # No header for auth means no token needed
+            return None
+
+        invalid_token = OAuth2TokenHandler.token_is_invalid(err_response)
+        # Flush the old token and get a new one. Tokens timeout
+        if invalid_token:
+            self._flush_token(invalid_token)
+
+        # Do we already have the proper scoped token in the cache for another url?
+        try:
+            cached_token = self.lookup_by_params(req_params)
+            return cached_token
+        except KeyError:
+            pass
+
+        try:
+            print 'Requesting token with {0} and params {1}'.format(auth_url, str(req_params))
+            response = get(auth_url, params=req_params)
+            self._add_token(url=req_url, params=req_params, raw_token=response.json())
+            return self._tokens[req_url]['raw_token']
+        except HTTPError, e:
+            raise e
+
+
+class AuthCommonBaseClient(CommonBaseClient):
+    token_handler = OAuth2TokenHandler()
+
+    def _add_auth(self, token, headers=None):
+        print 'Adding auth'
+        if headers is None:
+            headers = {}
+
+        headers['Authorization'] = 'Bearer ' + token
+        return headers
+
+    def _http_call(self, url, method, data=None, **kwargs):
+        print 'Executing {0} on {1}'.format(method.__name__, url)
+        header = {}
+        try:
+            # If there is a token for this url, use it
+            try:
+                token = self.token_handler.lookup_by_url(url)
+                header['Authorization'] = OAuth2TokenHandler.authorization_header_format.format(token['token'])
+            except KeyError:
+                pass
+
+            response = super(AuthCommonBaseClient, self)._http_call(url, method, data=data, headers=header, **kwargs)
+            print 'Response: ' + str(response)
+            return response
+        except HTTPError, e:
+            print str(e)
+            if OAuth2TokenHandler.needs_token(e.response):
+                invalid_token = OAuth2TokenHandler.token_is_invalid(e.response)
+                if invalid_token:
+                    self.token_handler.invalidate_token(invalid_token)
+                else:
+                    try:
+                        cached_token = self.token_handler.lookup_by_url(url)
+                        token = cached_token
+                    except KeyError:
+                        token = self.token_handler.request_auth_token(e.response)
+
+                    if token:
+                        header['Authorization'] = 'Bearer ' + self.token_handler.request_auth_token(e.response)['token']
+                        print 'Using auth header: ' + header['Authorization']
+                        try:
+                            response = super(AuthCommonBaseClient, self)._http_call(url, method, data=data, headers=header,
+                                                                                    **kwargs)
+                            print 'Response2: ' + str(response)
+                            return response
+                        except HTTPError, e:
+                            print str(e)
+
+                    else:
+                        raise Exception('No token found or fetched. Cannot proceed.')
+            else:
+                # Not a token problem. Just raise error
+                raise e
 
 
 class BaseClientV1(CommonBaseClient):
@@ -134,7 +303,7 @@ class BaseClientV1(CommonBaseClient):
                                namespace=namespace, repository=repository)
 
 
-class BaseClientV2(CommonBaseClient):
+class BaseClientV2(AuthCommonBaseClient):
     LIST_TAGS = '/v2/{name}/tags/list'
     MANIFEST = '/v2/{name}/manifests/{reference}'
     BLOB = '/v2/{name}/blobs/{digest}'
