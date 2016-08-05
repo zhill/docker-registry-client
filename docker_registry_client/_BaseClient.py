@@ -38,7 +38,6 @@ class CommonBaseClient(object):
                           data=data, headers=headers, **self.method_kwargs)
         logger.debug("%s %s", response.status_code, response.reason)
         if not response.ok:
-            logger.error("Error response: %r", response.text)
             response.raise_for_status()
 
         return response
