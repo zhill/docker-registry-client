@@ -38,6 +38,7 @@ class CommonBaseClient(object):
                           data=data, headers=headers, **self.method_kwargs)
         logger.debug("%s %s", response.status_code, response.reason)
         if not response.ok:
+            logger.debug("Error response: %r", response.text)
             response.raise_for_status()
 
         return response
@@ -114,8 +115,11 @@ class OAuth2TokenHandler:
         self._flush_token(token)
 
     def _flush_token(self, token):
-        for x in filter(lambda x: x['raw_token']['token'] == token, self._tokens.values()):
-            self._tokens.pop(x)
+        for url, cached_token in self._tokens.items():
+            if cached_token['raw_token']['token'] == token:
+                self._tokens.pop(url)
+        #for x in filter(lambda x: x['raw_token']['token'] == token, self._tokens.values()):
+        #    self._tokens.pop(x)
 
     @staticmethod
     def needs_token(err_response):
@@ -130,7 +134,9 @@ class OAuth2TokenHandler:
         """
         if OAuth2TokenHandler.needs_token(err_response) \
             and 'Authorization' in err_response.request.headers \
-            and err_response.response.content.contains('Invalid token'):
+            and 'www-authenticate' in err_response.headers \
+            and err_response.headers['www-authenticate'].find('error="invalid_token"') > 0:
+            logger.info('Received response from server indicating expired/invalid token')
             return err_response.request.headers['Authorization'].split(' ')[1]
         else:
             return False
@@ -179,41 +185,41 @@ class AuthCommonBaseClient(CommonBaseClient):
         return headers
 
     def _http_response(self, url, method, data=None, headers={}, **kwargs):
-        header = {}
+        #header = {}
         try:
             # If there is a token for this url, use it
             try:
                 token = self.token_handler.lookup_by_url(url)
-                header['Authorization'] = OAuth2TokenHandler.authorization_header_format.format(token['token'])
+                headers['Authorization'] = OAuth2TokenHandler.authorization_header_format.format(token['token'])
             except KeyError:
                 pass
 
-            response = super(AuthCommonBaseClient, self)._http_response(url, method, data=data, headers=header, **kwargs)
+            response = super(AuthCommonBaseClient, self)._http_response(url, method, data=data, headers=headers, **kwargs)
             return response
         except HTTPError, e:
             if OAuth2TokenHandler.needs_token(e.response):
                 invalid_token = OAuth2TokenHandler.token_is_invalid(e.response)
                 if invalid_token:
                     self.token_handler.invalidate_token(invalid_token)
-                else:
+                #else:
+                try:
+                    cached_token = self.token_handler.lookup_by_url(url)
+                    token = cached_token
+                except KeyError:
+                    token = self.token_handler.request_auth_token(e.response)
+
+                if token:
+                    headers['Authorization'] = 'Bearer ' + self.token_handler.request_auth_token(e.response)['token']
                     try:
-                        cached_token = self.token_handler.lookup_by_url(url)
-                        token = cached_token
-                    except KeyError:
-                        token = self.token_handler.request_auth_token(e.response)
+                        response = super(AuthCommonBaseClient, self)._http_response(url, method, data=data,
+                                                                                headers=headers,
+                                                                                **kwargs)
+                        return response
+                    except HTTPError, e:
+                        raise e
 
-                    if token:
-                        header['Authorization'] = 'Bearer ' + self.token_handler.request_auth_token(e.response)['token']
-                        try:
-                            response = super(AuthCommonBaseClient, self)._http_response(url, method, data=data,
-                                                                                    headers=header,
-                                                                                    **kwargs)
-                            return response
-                        except HTTPError, e:
-                            raise e
-
-                    else:
-                        raise Exception('No token found or fetched. Cannot proceed.')
+                else:
+                    raise Exception('No token found or fetched. Cannot proceed.')
             else:
                 # Not a token problem. Just raise error
                 raise e
@@ -235,24 +241,24 @@ class AuthCommonBaseClient(CommonBaseClient):
                 invalid_token = OAuth2TokenHandler.token_is_invalid(e.response)
                 if invalid_token:
                     self.token_handler.invalidate_token(invalid_token)
-                else:
+                #else:
+                try:
+                    cached_token = self.token_handler.lookup_by_url(url)
+                    token = cached_token
+                except KeyError:
+                    token = self.token_handler.request_auth_token(e.response)
+
+                if token:
+                    header['Authorization'] = 'Bearer ' + self.token_handler.request_auth_token(e.response)['token']
                     try:
-                        cached_token = self.token_handler.lookup_by_url(url)
-                        token = cached_token
-                    except KeyError:
-                        token = self.token_handler.request_auth_token(e.response)
+                        response = super(AuthCommonBaseClient, self)._http_call(url, method, data=data, headers=header,
+                                                                                **kwargs)
+                        return response
+                    except HTTPError, e:
+                        raise e
 
-                    if token:
-                        header['Authorization'] = 'Bearer ' + self.token_handler.request_auth_token(e.response)['token']
-                        try:
-                            response = super(AuthCommonBaseClient, self)._http_call(url, method, data=data, headers=header,
-                                                                                    **kwargs)
-                            return response
-                        except HTTPError, e:
-                            raise e
-
-                    else:
-                        raise Exception('No token found or fetched. Cannot proceed.')
+                else:
+                    raise Exception('No token found or fetched. Cannot proceed.')
             else:
                 # Not a token problem. Just raise error
                 raise e
