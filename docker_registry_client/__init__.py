@@ -2,6 +2,6 @@
 
 from __future__ import absolute_import
 
-from docker_registry_client.DockerRegistryClient import (DockerRegistryClient,
+from .DockerRegistryClient import (DockerRegistryClient,
                                                          BaseClient,
                                                          Repository)

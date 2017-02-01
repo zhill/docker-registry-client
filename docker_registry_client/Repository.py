@@ -1,6 +1,6 @@
 from __future__ import absolute_import
 
-from docker_registry_client.Image import Image
+from .Image import Image
 
 
 class BaseRepository(object):
@@ -90,6 +90,35 @@ class RepositoryV2(BaseRepository):
         response = self._client.get_repository_tags(self.name)
         self._tags = response['tags']
 
+    def get_manifest_digest(self, tag):
+        return self._client.get_manifest_digest(self.name, tag)
+
+    def get_blob(self, digest):
+        return self._client.get_blob(self.name, digest)
+
+    def layer_meta(self, layer_entry):
+
+        if 'size' in layer_entry:
+            # No need to call out, can use manifest data directly
+            return {'Download-Size': layer_entry['size'], 'BlobSum': layer_entry['digest'],
+                    'Date': ';', 'Last-Modified': '',
+                    'ETag': ''}
+
+        for url in layer_entry.get('urls',[]):
+            # Check for layer urls first
+            response = self._client.get_blob_meta(self.name, url)
+            if response and response.get('StatusCode') == 200:
+                break
+        else:
+            # None,
+            blobsum = layer_entry.get('blobSum', None)
+            if not blobsum:
+                return {}
+            response = self._client.get_blob_meta(self.name, blobsum)
+
+        return {'Download-Size': response.get('Content-Length', 'unknown'), 'BlobSum': blobsum,
+                'Date': response.get('Date', ''), 'Last-Modified': response.get('Last-Modified', ''),
+                'ETag': response.get('ETag', '').strip('"')}
 
 def Repository(client, *args, **kwargs):
     if client.version == 1:

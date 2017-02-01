@@ -1,8 +1,10 @@
 import logging
-from requests import get, put, delete, Response
+from requests import get, put, delete, Response, head
 from requests.exceptions import HTTPError
 import json
 import re
+import urlparse
+import urllib
 
 # urllib3 throws some ssl warnings with older versions of python
 #   they're probably ok for the registry client to ignore
@@ -29,14 +31,19 @@ class CommonBaseClient(object):
            data -> request body
            kwargs -> url formatting args
         """
-        headers['content-type'] = 'application/json'
-        if data:
+        if data and 'content-type' not in headers and 'Content-Type' not in headers:
+            headers['content-type'] = 'application/json'
             data = json.dumps(data)
+
         path = url.format(**kwargs)
+        #path = urllib.quote(path)
         logger.debug("%s %s", method.__name__.upper(), path)
         response = method(self.host + path,
                           data=data, headers=headers, **self.method_kwargs)
         logger.debug("%s %s", response.status_code, response.reason)
+        if response.status_code == 307 or response.status_code == 301:
+            redirect_url = urlparse.urlparse(response.headers['Location'])
+            response = method(redirect_url.geturl(), data=data, headers=headers, **self.method_kwargs)
         if not response.ok:
             logger.debug("Error response: %r", response.text)
             response.raise_for_status()
@@ -50,6 +57,9 @@ class CommonBaseClient(object):
            kwargs -> url formatting args
         """
         response = self._http_response(url, method, data=data, headers=headers, **kwargs)
+        if method == head and not response.content:
+            return response.headers
+
         if not response.content:
             return {}
 
@@ -177,20 +187,23 @@ class OAuth2TokenHandler:
 class AuthCommonBaseClient(CommonBaseClient):
     token_handler = OAuth2TokenHandler()
 
-    def _add_auth(self, token, headers=None):
+    @staticmethod
+    def _add_auth(token, headers=None):
         if headers is None:
             headers = {}
 
-        headers['Authorization'] = 'Bearer ' + token
+        headers['Authorization'] = OAuth2TokenHandler.authorization_header_format.format(token)
         return headers
 
-    def _http_response(self, url, method, data=None, headers={}, **kwargs):
-        #header = {}
+    def _http_response(self, url, method, data=None, headers=None, **kwargs):
+        if not headers:
+            headers = {}
+
         try:
             # If there is a token for this url, use it
             try:
                 token = self.token_handler.lookup_by_url(url)
-                headers['Authorization'] = OAuth2TokenHandler.authorization_header_format.format(token['token'])
+                headers = AuthCommonBaseClient._add_auth(token['token'], headers)
             except KeyError:
                 pass
 
@@ -209,7 +222,7 @@ class AuthCommonBaseClient(CommonBaseClient):
                     token = self.token_handler.request_auth_token(e.response)
 
                 if token:
-                    headers['Authorization'] = 'Bearer ' + self.token_handler.request_auth_token(e.response)['token']
+                    headers = AuthCommonBaseClient._add_auth(token['token'], headers=headers)
                     try:
                         response = super(AuthCommonBaseClient, self)._http_response(url, method, data=data,
                                                                                 headers=headers,
@@ -342,6 +355,10 @@ class BaseClientV2(AuthCommonBaseClient):
     LIST_TAGS = '/v2/{name}/tags/list'
     MANIFEST = '/v2/{name}/manifests/{reference}'
     BLOB = '/v2/{name}/blobs/{digest}'
+    _accept_media_types = ','.join(['application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json',
+              'application/vnd.docker.distribution.manifest.v1+prettyjws',
+              'application/vnd.docker.distribution.manifest.v1+json',
+              'application/vnd.docker.distribution.manifest.list.v2+json'])
 
     def __init__(self, *args, **kwargs):
         super(BaseClientV2, self).__init__(*args, **kwargs)
@@ -360,9 +377,21 @@ class BaseClientV2(AuthCommonBaseClient):
     def get_repository_tags(self, name):
         return self._http_call(self.LIST_TAGS, get, name=name)
 
+    def get_blob(self, name, digest):
+        return self._http_response(self.BLOB, get, name=name, digest=digest)
+
+    def get_manifest_digest(self, name, reference):
+        custom_headers = {
+            'Accept': self._accept_media_types
+        }
+        response = self._http_response(self.MANIFEST, head, name=name, reference=reference, headers=custom_headers)
+        return response.headers['Docker-Content-Digest']
+
     def get_manifest_and_digest(self, name, reference):
-        response = self._http_response(self.MANIFEST, get,
-                                       name=name, reference=reference)
+        custom_headers = {
+            'Accept': self._accept_media_types
+        }
+        response = self._http_response(self.MANIFEST, get, name=name, reference=reference, headers=custom_headers)
         self._cache_manifest_digest(name, reference, response=response)
         return (response.json(), self._manifest_digests[name, reference])
 
@@ -373,6 +402,13 @@ class BaseClientV2(AuthCommonBaseClient):
     def delete_blob(self, name, digest):
         return self._http_call(self.BLOB, delete,
                                name=name, digest=digest)
+
+    def get_blob_meta(self, name, digest, url=None):
+        if not url:
+            resp = self._http_call(self.BLOB, head, name=name, digest=digest)
+        else:
+            resp = self._http_call(url, head)
+        return resp
 
     def _cache_manifest_digest(self, name, reference, response=None):
         if not response:
