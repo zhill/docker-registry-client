@@ -6,7 +6,7 @@ import docker_registry_client._BaseClient
 from requests import get
 
 
-logging.basicConfig(level='DEBUG')
+logging.basicConfig(level='DEBUG', format='%(asctime)-15s %(levelname)s %(filename)s %(message)s')
 logger = logging.getLogger(__name__)
 
 class TestAuthCommonBaseClient(object):
@@ -19,44 +19,54 @@ class TestAuthCommonBaseClient(object):
     nginx_latest_manifest = '/v2/library/nginx/manifests/latest'
 
     def test_check_status(self):
-        print 'Listing the catalog'
+        logger.info('Testing Listing the catalog')
         response = docker_registry_client._BaseClient.AuthCommonBaseClient(self.host)._http_call(self.version_check_url, method=get)
-        print 'Got response: %s' % str(response)
+        logger.info('Got response: %s' % str(response))
 
     def test_tag_listing(self):
+        logger.info('Testing Tag listing')
         response = docker_registry_client._BaseClient.AuthCommonBaseClient(self.host)._http_call(self.nginx_url,
                                                                                      method=get)
-        print 'Got response: %s' % str(response)
+        logger.info('Got response: %s' % str(response))
         if hasattr(response, 'content'):
-            print 'Content: ' + str(response.content)
+            logger.info('Content: ' + str(response.content))
 
     def test_token_timeout(self):
+        logger.info('Testing token timeouts')
         client = docker_registry_client._BaseClient.AuthCommonBaseClient(self.host)
         try:
 
             for i in range(0, 5):
                 response =client._http_call(self.nginx_latest_manifest, method=get)
-                print str(response)
+                logger.info(str(response))
                 response = None
-                print 'Sleeping for 5 minutes to try again'
-                time.sleep(5*60)
+                logger.info('Sleeping for 5 + 1 sec minutes to try again')
+                time.sleep((5*60) + 1)
         except Exception as e:
             logger.error('Exception: ' + e.message, exc_info=1)
+            raise e
 
     def test_token_invalidate(self):
+        logger.info('Testing token invalidation')
         t = docker_registry_client._BaseClient.OAuth2TokenHandler()
         t._add_token('http://testurl', {'param':'value'}, {'token':'abc'})
         t.invalidate_token('abc')
+        try:
+            t.lookup_by_url('http://testurl')
+            logger.info('Expected a KeyError')
+            raise Exception('Failed test, did not invalidate token properly')
+        except KeyError:
+            return
 
 if __name__ == '__main__':
     t = TestAuthCommonBaseClient()
-    print 'Checking status'
+    logger.info('Checking status')
     t.test_check_status()
-    print 'Listing nginx tags'
+    logger.info('Listing nginx tags')
     t.test_tag_listing()
-    print 'Testing token invalidation'
+    logger.info('Testing token invalidation')
     t.test_token_invalidate()
-    print 'Testing timeout'
+    logger.info('Testing timeout')
     t.test_token_timeout()
 
 

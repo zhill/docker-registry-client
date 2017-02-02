@@ -4,7 +4,7 @@ from requests.exceptions import HTTPError
 import json
 import re
 import urlparse
-import urllib
+import datetime
 
 # urllib3 throws some ssl warnings with older versions of python
 #   they're probably ok for the registry client to ignore
@@ -85,10 +85,19 @@ class OAuth2TokenHandler:
         self._www_auth_matcher = re.compile(self._www_authentication_regex)
 
     def _add_token(self, url, params, raw_token):
-        self._tokens[url] = { 'urls': [url], 'params':params, 'raw_token': raw_token}
+        now = datetime.datetime.utcnow()
+        expiration = now + datetime.timedelta(seconds=int(raw_token.get('expires_in', 300)))
+        self._tokens[url] = { 'urls': [url], 'params':params, 'raw_token': raw_token, 'timestamp': now, 'expiration': expiration}
 
     def lookup_by_url(self, url):
-        return self._tokens[url]['raw_token']
+        found = self._tokens[url]
+        if found:
+            if found['expiration'] > datetime.datetime.utcnow():
+                return found['raw_token']
+            else:
+                logger.debug('Found cached token, but it is expired. Flushing and failing cache lookup')
+                self.invalidate_token(found['raw_token']['token'])
+        raise KeyError(url)
 
     def lookup_by_params(self, params):
         """
@@ -99,12 +108,17 @@ class OAuth2TokenHandler:
         """
         matches = filter(lambda x: x['params'] == params, self._tokens.values())
         if len(matches) > 0:
-            return matches[0]['raw_token']
+            for m in matches:
+                if m['expiration'] > datetime.datetime.utcnow():
+                    return m['raw_token']
+                else:
+                    logger.debug('Found cached token, but it is expired. Flushing and failing cache lookup')
+                    self.invalidate_token(m['raw_token']['token'])
+                return matches[0]['raw_token']
         else:
             raise KeyError(params)
 
     def _parse_wwwauthenticate(self, header):
-
         header = header.strip()
         header_match = self._www_auth_matcher.search(header)
         if len(header_match.groups()) <= 0:
@@ -122,14 +136,23 @@ class OAuth2TokenHandler:
             raise ValueError('Error header should include a realm key')
 
     def invalidate_token(self, token):
+        """
+        Invalidate the cache entry for the token value
+        :param token:
+        :return:
+        """
         self._flush_token(token)
 
     def _flush_token(self, token):
+        """
+        Flush a cache entry by the actual token value
+        :param token:
+        :return:
+        """
+        logger.debug('Flushing token: {}'.format(token))
         for url, cached_token in self._tokens.items():
             if cached_token['raw_token']['token'] == token:
                 self._tokens.pop(url)
-        #for x in filter(lambda x: x['raw_token']['token'] == token, self._tokens.values()):
-        #    self._tokens.pop(x)
 
     @staticmethod
     def needs_token(err_response):
@@ -146,39 +169,48 @@ class OAuth2TokenHandler:
             and 'Authorization' in err_response.request.headers \
             and 'www-authenticate' in err_response.headers \
             and err_response.headers['www-authenticate'].find('error="invalid_token"') > 0:
-            logger.info('Received response from server indicating expired/invalid token')
+            logger.info('Received response from server indicating expired/invalid token: {}'.format(err_response.headers))
             return err_response.request.headers['Authorization'].split(' ')[1]
         else:
             return False
 
-    def request_auth_token(self, err_response):
+    def request_auth_token(self, err_response, use_cache=True):
         """
-        Get a token from the passed error response that indicates a required token
-        :param err_response:
+        Get a token from the passed error response that indicates a required token. Uses cache
+        :param err_response: the error response indicating a token needed
+        :param use_cache: use a token cache to avoid repeat requests. Default=True
         :return:
         """
-        try:
-            req_url = err_response.request.url
-            auth_url, req_params = self._parse_wwwauthenticate(err_response.headers['www-authenticate'])
-        except KeyError:
-            # No header for auth means no token needed
-            return None
 
+        # Was the token in the original request invalid?
         invalid_token = OAuth2TokenHandler.token_is_invalid(err_response)
         # Flush the old token and get a new one. Tokens timeout
         if invalid_token:
             self._flush_token(invalid_token)
 
-        # Do we already have the proper scoped token in the cache for another url?
+        # Parse the error response to get auth info
         try:
-            cached_token = self.lookup_by_params(req_params)
-            return cached_token
+            req_url = err_response.request.url
+            auth_url, req_params = self._parse_wwwauthenticate(err_response.headers['www-authenticate'])
+            logger.debug('Getting auth token from auth url: {0} and params {1}'.format(auth_url, req_params))
         except KeyError:
-            pass
+            # No header for auth means no token needed
+            return None
+
+        # Do we already have the proper scoped token in the cache?
+        if use_cache:
+            try:
+                cached_token = self.lookup_by_params(req_params)
+                logger.debug('Found valid cached token: {}'.format(cached_token))
+                return cached_token
+            except KeyError:
+                pass
 
         try:
+            logger.debug('No valid cache entry found. Requesting a new token from {0} with params {1}'.format(auth_url, req_params))
             response = get(auth_url, params=req_params)
             self._add_token(url=req_url, params=req_params, raw_token=response.json())
+            logger.debug('Added new token to cache and returning to caller')
             return self._tokens[req_url]['raw_token']
         except HTTPError, e:
             raise e
@@ -210,17 +242,9 @@ class AuthCommonBaseClient(CommonBaseClient):
             response = super(AuthCommonBaseClient, self)._http_response(url, method, data=data, headers=headers, **kwargs)
             return response
         except HTTPError, e:
-            if OAuth2TokenHandler.needs_token(e.response):
-                invalid_token = OAuth2TokenHandler.token_is_invalid(e.response)
-                if invalid_token:
-                    self.token_handler.invalidate_token(invalid_token)
-                #else:
-                try:
-                    cached_token = self.token_handler.lookup_by_url(url)
-                    token = cached_token
-                except KeyError:
-                    token = self.token_handler.request_auth_token(e.response)
 
+            if OAuth2TokenHandler.needs_token(e.response):
+                token = self.token_handler.request_auth_token(e.response)
                 if token:
                     headers = AuthCommonBaseClient._add_auth(token['token'], headers=headers)
                     try:
