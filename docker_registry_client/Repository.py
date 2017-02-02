@@ -77,11 +77,11 @@ class RepositoryV2(BaseRepository):
 
         return self._tags
 
-    def manifest(self, tag):
+    def manifest(self, tag, accept_version=None):
         """
         Return a tuple, (manifest, digest), for a given tag
         """
-        return self._client.get_manifest_and_digest(self.name, tag)
+        return self._client.get_manifest_and_digest(self.name, tag, accept_version)
 
     def delete_manifest(self, digest):
         return self._client.delete_manifest(self.name, digest)
@@ -96,29 +96,13 @@ class RepositoryV2(BaseRepository):
     def get_blob(self, digest):
         return self._client.get_blob(self.name, digest)
 
-    def layer_meta(self, layer_entry):
+    def get_blob_meta(self, blob_digest, url=None):
 
-        if 'size' in layer_entry:
-            # No need to call out, can use manifest data directly
-            return {'Download-Size': layer_entry['size'], 'BlobSum': layer_entry['digest'],
-                    'Date': ';', 'Last-Modified': '',
-                    'ETag': ''}
-
-        for url in layer_entry.get('urls',[]):
-            # Check for layer urls first
-            response = self._client.get_blob_meta(self.name, url)
-            if response and response.get('StatusCode') == 200:
-                break
-        else:
-            # None,
-            blobsum = layer_entry.get('blobSum', None)
-            if not blobsum:
-                return {}
-            response = self._client.get_blob_meta(self.name, blobsum)
-
-        return {'Download-Size': response.get('Content-Length', 'unknown'), 'BlobSum': blobsum,
-                'Date': response.get('Date', ''), 'Last-Modified': response.get('Last-Modified', ''),
-                'ETag': response.get('ETag', '').strip('"')}
+        # Check for layer urls first
+        response = self._client.get_blob_meta(self.name, digest=blob_digest, url=url)
+        return {'Download-Size': response.headers.get('Content-Length', 'unknown'), 'Digest': blob_digest,
+                'Date': response.headers.get('Date', ''), 'Last-Modified': response.headers.get('Last-Modified', ''),
+                'ETag': response.headers.get('ETag', '').strip('"')}
 
 def Repository(client, *args, **kwargs):
     if client.version == 1:

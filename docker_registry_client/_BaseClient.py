@@ -355,10 +355,9 @@ class BaseClientV2(AuthCommonBaseClient):
     LIST_TAGS = '/v2/{name}/tags/list'
     MANIFEST = '/v2/{name}/manifests/{reference}'
     BLOB = '/v2/{name}/blobs/{digest}'
-    _accept_media_types = ','.join(['application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json',
-              'application/vnd.docker.distribution.manifest.v1+prettyjws',
-              'application/vnd.docker.distribution.manifest.v1+json',
-              'application/vnd.docker.distribution.manifest.list.v2+json'])
+    _v1_media_types = ','.join(['application/vnd.docker.distribution.manifest.v1+json','application/vnd.docker.distribution.manifest.v1+prettyjws'])
+    _v2_media_types = ','.join(['application/vnd.oci.image.manifest.v1+json','application/vnd.docker.distribution.manifest.list.v2+json','application/vnd.docker.distribution.manifest.v2+json'])
+    _all_accept_media_types = ','.join([_v2_media_types, _v1_media_types])
 
     def __init__(self, *args, **kwargs):
         super(BaseClientV2, self).__init__(*args, **kwargs)
@@ -382,15 +381,24 @@ class BaseClientV2(AuthCommonBaseClient):
 
     def get_manifest_digest(self, name, reference):
         custom_headers = {
-            'Accept': self._accept_media_types
+            'Accept': self._all_accept_media_types
         }
         response = self._http_response(self.MANIFEST, head, name=name, reference=reference, headers=custom_headers)
         return response.headers['Docker-Content-Digest']
 
-    def get_manifest_and_digest(self, name, reference):
+    def get_manifest_and_digest(self, name, reference, accept_version=None):
         custom_headers = {
-            'Accept': self._accept_media_types
+            'Accept': self._all_accept_media_types
         }
+
+        if accept_version:
+            if accept_version == 1:
+                custom_headers['Accept'] = self._v1_media_types
+            elif accept_version == 2:
+                custom_headers['Accept'] = self._v2_media_types
+            else:
+                raise ValueError(accept_version)
+
         response = self._http_response(self.MANIFEST, get, name=name, reference=reference, headers=custom_headers)
         self._cache_manifest_digest(name, reference, response=response)
         return (response.json(), self._manifest_digests[name, reference])
@@ -405,9 +413,9 @@ class BaseClientV2(AuthCommonBaseClient):
 
     def get_blob_meta(self, name, digest, url=None):
         if not url:
-            resp = self._http_call(self.BLOB, head, name=name, digest=digest)
+            resp = self._http_response(self.BLOB, head, name=name, digest=digest)
         else:
-            resp = self._http_call(url, head)
+            resp = self._http_response(url, head)
         return resp
 
     def _cache_manifest_digest(self, name, reference, response=None):
