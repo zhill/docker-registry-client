@@ -43,6 +43,8 @@ class CLI(object):
                                  help='repository (including namespace)')
         self.parser.add_argument('ref', metavar='REF', nargs='?',
                                  help='tag or digest')
+        self.parser.add_argument('--username', dest='username')
+        self.parser.add_argument('--password', dest='password')
 
         self.parser.set_defaults(verify_ssl=True, api_version=None)
 
@@ -60,6 +62,12 @@ class CLI(object):
         kwargs = {}
         if args.api_version:
             kwargs['api_version'] = args.api_version
+
+        if args.username:
+            kwargs['username'] = args.username
+
+        if args.password:
+            kwargs['password'] = args.password
 
         client = DockerRegistryClient(args.registry[0],
                                       verify_ssl=args.verify_ssl,

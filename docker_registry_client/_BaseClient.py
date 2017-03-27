@@ -80,9 +80,11 @@ class OAuth2TokenHandler:
     authorization_header_format = 'Bearer {0}'
     _www_authentication_regex = 'Bearer (realm="[^"]+")(,service="[^"]+")?(,scope="[^"]+")?'
 
-    def __init__(self):
+    def __init__(self, username=None, passwd=None):
         self._tokens = {}
         self._www_auth_matcher = re.compile(self._www_authentication_regex)
+        self.username = username
+        self.password = passwd
 
     def _add_token(self, url, params, raw_token):
         now = datetime.datetime.utcnow()
@@ -208,7 +210,10 @@ class OAuth2TokenHandler:
 
         try:
             logger.debug('No valid cache entry found. Requesting a new token from {0} with params {1}'.format(auth_url, req_params))
-            response = get(auth_url, params=req_params)
+            if self.username and self.password:
+                response = get(auth_url, params=req_params, auth=(self.username, self.password))
+            else:
+                response = get(auth_url, params=req_params)
             self._add_token(url=req_url, params=req_params, raw_token=response.json())
             logger.debug('Added new token to cache and returning to caller')
             return self._tokens[req_url]['raw_token']
@@ -217,7 +222,10 @@ class OAuth2TokenHandler:
 
 
 class AuthCommonBaseClient(CommonBaseClient):
-    token_handler = OAuth2TokenHandler()
+
+    def __init__(self, host, verify_ssl=None, username=None, password=None):
+        super(AuthCommonBaseClient, self).__init__(host, verify_ssl, username=None, password=None)
+        self.token_handler = OAuth2TokenHandler(username, password)
 
     @staticmethod
     def _add_auth(token, headers=None):
