@@ -49,10 +49,10 @@ class TestAuthCommonBaseClient(object):
     def test_token_invalidate(self):
         logger.info('Testing token invalidation')
         t = docker_registry_client._BaseClient.OAuth2TokenHandler()
-        t._add_token('http://testurl', {'param':'value'}, {'token':'abc'})
+        t._add_token('/', 'http://testurl', {'param':'value'}, {'token':'abc'})
         t.invalidate_token('abc')
         try:
-            t.lookup_by_url('http://testurl')
+            t.lookup_by_path('/')
             logger.info('Expected a KeyError')
             raise Exception('Failed test, did not invalidate token properly')
         except KeyError:

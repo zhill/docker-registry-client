@@ -9,3 +9,6 @@
 
 # Virtual env
 /venv/
+
+# IDE
+*.idea
