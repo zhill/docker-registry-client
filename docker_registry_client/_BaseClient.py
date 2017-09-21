@@ -485,6 +485,8 @@ class BaseClientV2(AuthCommonBaseClient):
             raise NotImplementedError()
 
         untrusted_digest = response.headers.get('Docker-Content-Digest')
+        if not untrusted_digest:
+            untrusted_digest = self.get_manifest_digest(name, reference)
         self._manifest_digests[(name, reference)] = untrusted_digest
 
 
