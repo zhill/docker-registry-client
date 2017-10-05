@@ -230,6 +230,11 @@ class OAuth2TokenHandler(GenericTokenHandler):
                 response = get(auth_url, params=req_params, auth=(self.username, self.password))
             else:
                 response = get(auth_url, params=req_params)
+
+            if not response.ok:
+                logger.debug("Error response requesting token: %r", response.text)
+                response.raise_for_status()
+
             self._add_token(path=path, url=req_url, params=req_params, raw_token=response.json())
             logger.debug('Added new token to cache and returning to caller')
             return self._tokens[path]['raw_token']
