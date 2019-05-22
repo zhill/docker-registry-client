@@ -200,3 +200,12 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+Modifications Copyright 2016 Anchore, Inc.
+Modified Files:
+docker-registry-show.py
+requirements.txt
+docker_registry_client/DockerRegistryClient.py
+docker_registry_client/__init__.py
+docker_registry_client/_BaseClient.py
+docker_registry_client/Repository.py

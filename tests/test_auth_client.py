@@ -1,3 +1,5 @@
+# Modifications copyright (C) 2017 Zach Hill
+
 from __future__ import absolute_import
 
 import time
